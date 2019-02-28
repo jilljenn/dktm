@@ -3,24 +3,35 @@ from torch import optim
 import torch.nn as nn
 from random import randint
 from collections import defaultdict
+from sklearn.metrics import roc_auc_score
+from prepare import fraction
 import numpy as np
 import sys
 import json
+import argparse
+
+
+parser = argparse.ArgumentParser(description='Run DKTM')
+parser.add_argument('--batch_size', type=int, nargs='?', default=250)
+parser.add_argument('--bptt', type=int, nargs='?', default=2)
+parser.add_argument('--iter', type=int, nargs='?', default=2)
+parser.add_argument('--data', type=str, nargs='?', default='sim')
+parser.add_argument('--d', type=int, nargs='?', default=20)
+options = parser.parse_args()
 
 
 NUM_WORDS = 50
 HIDDEN_SIZE = 20
 NB_EPOCHS = 50
 learning_rate = 0.005
-DATA = 'real'
 
 
 USE_CUDA = torch.cuda.is_available()
 device = torch.device("cuda" if USE_CUDA else "cpu")
-# print(device)
+print('device', device)
 
 
-def sim(n, m):
+def sim(n, m):  # Should try simulated data of uneven length
     return [list(range(randint(0, 5), 5 * m + 1, randint(1, 5)))[:m]
             for _ in range(n)]
 
@@ -36,60 +47,28 @@ def gen_int(n, m, max_val=NUM_WORDS):
     return np.random.randint(max_val, size=(n, m))
 
 
-if DATA == 'sim':
+if options.data == 'sim':
     N = nb_students = 5
     M = nb_questions = 3
     actions = gen_int(N, M)
+    lengths = [nb_questions] * nb_students
     exercises = gen_int(N, M)
     targets = gen_int(N, M, 2)
 else:
-    # Load data
-    with open('/Users/jilljenn/code/qna/data/fraction.json') as f:
-        answers = np.array(json.load(f)['student_data'], dtype=np.int32)
-    nb_students, nb_questions = answers.shape
-    with open('/Users/jilljenn/code/qna/data/qmatrix-fraction.json') as f:
-        q = np.array(json.load(f)['Q'], dtype=np.int32)
-    # Encode all actions
-    skills = set()
-    for line in q:
-        code = ''.join(map(str, line))
-        skills.add(code + '0')
-        skills.add(code + '1')
-    encode = dict(zip(skills, range(10000)))
-    # Encode pairs
-    encode_pair = {}
-    for j in range(nb_questions):
-        code = ''.join(map(str, q[j]))
-        encode_pair[(j, 0)] = encode[code + '0']
-        encode_pair[(j, 1)] = encode[code + '1']
-    # Encode actions per user
-    actions = [[] for _ in range(nb_students)]
-    exercises = [[] for _ in range(nb_students)]
-    targets = [[] for _ in range(nb_students)]
-    for i in range(nb_students):
-        for j in range(nb_questions - 1):
-            actions[i].append(encode_pair[(j, answers[i][j])])
-        exercises[i] = np.arange(nb_questions - 1)
-        targets[i] = answers[i][1:]
-    N, M = len(actions), len(actions[0])
-    # print(len(exercises), len(exercises[0]))
-    # print(len(targets), len(targets[0]))
+    # Load Fraction dataset (or Assistments)
+    actions, lengths, exercises, targets = fraction()
+    nb_students = len(actions)
+
 
 UNTIL_TRAIN = round(0.8 * nb_students)
 train_actions = actions[:UNTIL_TRAIN]
+train_lengths = lengths[:UNTIL_TRAIN]
 train_exercises = exercises[:UNTIL_TRAIN]
 train_targets = targets[:UNTIL_TRAIN]
 test_actions = actions[UNTIL_TRAIN:]
+test_lengths = lengths[UNTIL_TRAIN:]
 test_exercises = exercises[UNTIL_TRAIN:]
 test_targets = targets[UNTIL_TRAIN:]
-
-
-# print(actions)
-# print(exercises)
-# print(targets)
-
-
-# sys.exit(0)
 
 
 class EncoderRNN(nn.Module):
@@ -109,8 +88,6 @@ class EncoderRNN(nn.Module):
         outputs, hidden = self.gru(packed, hidden)
         outputs, _ = torch.nn.utils.rnn.pad_packed_sequence(
             outputs, batch_first=True)
-        # outputs = (outputs[:, :, :self.hidden_size] +
-        #            outputs[:, :, self.hidden_size:])
         return outputs, hidden
 
 
@@ -124,10 +101,29 @@ class Decoder(nn.Module):
         return embedded
 
 
-def maskNLLLoss(inp, target, mask=None):
-    # print('target', target.view(-1, 1).shape)
+class DKTM(nn.Module):
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.hidden_size = hidden_size
+        user_embedding = nn.Embedding(NUM_WORDS, HIDDEN_SIZE)
+        item_embedding = nn.Embedding(NUM_WORDS, HIDDEN_SIZE)
+        self.encoder = EncoderRNN(HIDDEN_SIZE, user_embedding)
+        # Try factorization machines
+        self.decoder = Decoder(item_embedding)
 
-    # print('input', inp.shape)
+    def forward(self, actions, lengths, exercises, hidden=None):
+        encoder_outputs, enc_hidden = self.encoder(actions, lengths, hidden)
+        decoded = self.decoder(exercises)
+        logits = torch.einsum('bsd,bsd->bs', encoder_outputs, decoded)
+        return logits, enc_hidden
+
+    def init_hidden(self, batch_size):
+        weight = next(self.parameters())
+        return weight.new_zeros(self.encoder.n_layers, batch_size,
+                                self.encoder.hidden_size)
+
+
+def criterion(inp, target, mask=None):
     # nTotal = mask.sum()
     # crossEntropy = -torch.log(torch.gather(inp, 0, target).squeeze(1))
     cross_entropy = nn.BCEWithLogitsLoss()
@@ -137,82 +133,90 @@ def maskNLLLoss(inp, target, mask=None):
     return loss  # , nTotal.item()
 
 
-def predict(input_var, lengths, target, encoder, decoded):
-    # print('oh oh', input_var.shape, lengths.shape)
-    encoder_outputs, encoder_hidden = encoder(input_var, lengths)
-    # print('enc', encoder_outputs.shape)
-    # print('dec', decoded.shape)
+def predict_and_eval(mode, model, actions, lengths, eval_var, target,
+                     hidden=None):
+    logits, hidden = model(actions, lengths, eval_var, hidden)
 
-    logits = torch.einsum('bsd,bsd->bs', encoder_outputs, decoded)
-    # print('logits', logits)
     proba = 1/(1 + np.exp(-logits.detach().numpy()))
     pred = np.round(proba)
-    # print('proba', pred)
     target0 = target.detach().numpy()
-    # print(pred.shape)
-    # print(type(pred))
-    # print(target0.shape)
-    # print(type(target0))
+
     acc = (pred == target0).astype(np.int32).sum() / len(target0.flatten())
-    print('acc', acc)
-    # print('target', target)
-    return logits, proba, pred, acc
+    if mode == 'test':
+        print('acc={:f} auc={:f}'.format(acc, roc_auc_score(target0, pred)))
+    return logits, hidden, proba, pred, acc
 
 
-def train(input_var, lengths, target, encoder, decoded,
-          encoder_optimizer, decoder_optimizer):
-    encoder_optimizer.zero_grad()
-    decoder_optimizer.zero_grad()
+def get_batch(actions, lengths, exercises, targets, pos, t):
+    return (actions[pos:pos + options.batch_size, t:t + options.bptt],
+            torch.clamp(lengths[pos:pos + options.batch_size] - t,
+                        0, options.bptt),
+            exercises[pos:pos + options.batch_size, t:t + options.bptt],
+            targets[pos:pos + options.batch_size, t:t + options.bptt])
 
-    input_var.to(device)
-    lengths.to(device)
+
+def repackage_hidden(h):
+    """Wraps hidden states in new Tensors, to detach them from history."""
+    if isinstance(h, torch.Tensor):
+        return h.detach()
+    else:
+        return tuple(repackage_hidden(v) for v in h)
+
+
+def train(train_actions, train_lengths, train_exercises, train_targets,
+          optimizer):
+    model.train()
 
     print('# TRAIN')
-    logits, proba, pred, acc = predict(input_var, lengths, target,
-                                       encoder, decoded)
-    # sys.exit(0)
+    for pos in range(0, len(train_actions), options.batch_size):  # .size()
+        actual_batch_size = min(options.batch_size, len(train_actions) - pos)
+        hidden = model.init_hidden(actual_batch_size)
+        for t in range(0, train_lengths[pos], options.bptt):
+            # Get batch limited to current time window (bptt)
+            actions, lengths, exercises, targets = get_batch(
+                train_actions, train_lengths, train_exercises, train_targets,
+                pos, t)
 
-    loss = 0
-    mask_loss = maskNLLLoss(logits, target)
-    # print('loss', mask_loss.detach().numpy())
-    loss += mask_loss
+            hidden = repackage_hidden(hidden)  # Detach previous hidden state
+            optimizer.zero_grad()
+            logits, hidden, proba, pred, acc = predict_and_eval(
+                'train', model, actions, lengths, exercises, targets, hidden)
 
-    loss.backward(retain_graph=True)
+            loss = criterion(logits, targets)
+            # print('loss', loss.detach().numpy())
+            loss.backward()
+            optimizer.step()
 
-    encoder_optimizer.step()
-    decoder_optimizer.step()
 
-
-def test(input_var, lengths, target, encoder, decoded):
-    input_var.to(device)
-    lengths.to(device)
+def test(actions, lengths, exercises, targets):
+    model.eval()
 
     print('# TEST')
-    logits, proba, pred, acc = predict(input_var, lengths, target,
-                                       encoder, decoded)
+    with torch.no_grad():
+        logits, hidden, proba, pred, acc = predict_and_eval(
+            'test', model, actions, lengths, exercises, targets)
 
 
 if __name__ == '__main__':
-    user_embedding = nn.Embedding(NUM_WORDS, HIDDEN_SIZE)
-    item_embedding = nn.Embedding(NUM_WORDS, HIDDEN_SIZE)
-    encoder = EncoderRNN(HIDDEN_SIZE, user_embedding)
-    decoder = Decoder(item_embedding)
-    encoder_optimizer = optim.Adam(encoder.parameters(), lr=learning_rate)
+    # Model
+    model = DKTM(HIDDEN_SIZE)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
     # Prepare data
-    input_var = torch.LongTensor(train_actions)
-    eval_var = torch.LongTensor(train_exercises)
-    target = torch.FloatTensor(train_targets)
-    test_input_var = torch.LongTensor(test_actions)
-    test_eval_var = torch.LongTensor(test_exercises)
-    test_target = torch.FloatTensor(test_targets)
+    input_var = torch.LongTensor(train_actions).to(device)
+    lengths = torch.LongTensor(train_lengths).to(device)
+    eval_var = torch.LongTensor(train_exercises).to(device)
+    target = torch.FloatTensor(train_targets).to(device)
 
-    decoded = decoder(eval_var)
-    test_decoded = decoder(test_eval_var)
-    decoder_optimizer = optim.Adam(decoder.parameters(), lr=learning_rate)
+    test_input_var = torch.LongTensor(test_actions).to(device)
+    test_lengths = torch.LongTensor(test_lengths).to(device)
+    test_eval_var = torch.LongTensor(test_exercises).to(device)
+    test_target = torch.FloatTensor(test_targets).to(device)
 
-    for _ in range(NB_EPOCHS):
-        train(input_var, torch.tensor([M] * len(input_var)), target, encoder,
-              decoded, encoder_optimizer, decoder_optimizer)
-        test(test_input_var, torch.tensor([M] * len(test_input_var)),
-             test_target, encoder, test_decoded)
+    for _ in range(options.iter):  # Number of epochs
+        train(input_var, lengths, eval_var, target, optimizer)
+    test(input_var, lengths, eval_var, target)
+    test(test_input_var, test_lengths, test_eval_var, test_target)
+
+
+print(json.dumps(vars(options), indent=4))
