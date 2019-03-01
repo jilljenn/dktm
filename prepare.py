@@ -1,5 +1,6 @@
 import numpy as np
 import json
+import sys
 
 
 def fraction():
@@ -36,4 +37,6 @@ def fraction():
     N, M = len(actions), len(actions[0])
     # print(len(exercises), len(exercises[0]))
     # print(len(targets), len(targets[0]))
+    print(max(max(actions[i]) for i in range(N)), 'wow')
+    # sys.exit(0)
     return actions, lengths, exercises, targets
