@@ -13,17 +13,18 @@ import argparse
 
 
 parser = argparse.ArgumentParser(description='Run DKTM')
-parser.add_argument('--batch_size', type=int, nargs='?', default=250)
-parser.add_argument('--bptt', type=int, nargs='?', default=2)
-parser.add_argument('--iter', type=int, nargs='?', default=2)
-parser.add_argument('--data', type=str, nargs='?', default='sim')
+parser.add_argument('--batch_size', type=int, nargs='?', default=500)
+parser.add_argument('--bptt', type=int, nargs='?', default=100)
+parser.add_argument('--iter', type=int, nargs='?', default=200)
+parser.add_argument('--data', type=str, nargs='?', default='assistments')
 parser.add_argument('--d', type=int, nargs='?', default=20)
+parser.add_argument('--lr', type=float, nargs='?', default=0.005)
 options = parser.parse_args()
 print(options)
 
 
-hidden_size = 20
-learning_rate = 0.005
+hidden_size = options.d
+learning_rate = options.lr
 metrics = defaultdict(list)
 
 
@@ -106,10 +107,13 @@ class EncoderRNN(nn.Module):
                           batch_first=True)
 
     def forward(self, input_seq, input_lengths, hidden=None):
+        # print('inp seq', input_seq.device)
         embedded = self.embedding(input_seq)
         # packed = torch.nn.utils.rnn.pack_padded_sequence(
         #     embedded, input_lengths, batch_first=True)
         # outputs, hidden = self.gru(packed, hidden)
+        # print('emb', embedded.device)
+        # print('hid', hidden.device)
         outputs, hidden = self.gru(embedded, hidden)
         # outputs, _ = torch.nn.utils.rnn.pad_packed_sequence(
         #     outputs, batch_first=True)
@@ -133,11 +137,15 @@ class DKTM(nn.Module):
         self.hidden_size = hidden_size
         user_embedding = nn.Embedding(nb_distinct_actions, self.hidden_size)
         item_embedding = nn.Embedding(nb_distinct_questions, self.hidden_size)
+        # print('user emb', user_embedding.device)
+        # print('item emb', item_embedding.device)
         self.encoder = EncoderRNN(self.hidden_size, user_embedding)
         # Try factorization machines
         self.decoder = Decoder(item_embedding)
 
     def forward(self, actions, lengths, exercises, hidden=None):
+        # print('act', actions.device)
+        # print('len', lengths.device)
         encoder_outputs, enc_hidden = self.encoder(actions, lengths, hidden)
         decoded = self.decoder(exercises)
         logits = torch.einsum('bsd,bsd->bs', encoder_outputs, decoded)
@@ -146,12 +154,14 @@ class DKTM(nn.Module):
     def init_hidden(self, batch_size):
         weight = next(self.parameters())
         return weight.new_zeros(self.encoder.n_layers, batch_size,
-                                self.encoder.hidden_size)
+                                self.encoder.hidden_size, device=device)
 
 
 def sequence_mask(lengths, max_len):
-    indexes = torch.arange(0, max_len)
-    return torch.ByteTensor((indexes < lengths.unsqueeze(1))).to(device)
+    indexes = torch.arange(0, max_len).to(device)
+    # print('dev', indexes.device)
+    # print('dev', lengths.device)
+    return (indexes < lengths.unsqueeze(1)).byte()
 
 
 def criterion(inp, target, mask=None):
@@ -166,24 +176,21 @@ def criterion(inp, target, mask=None):
 
 
 def eval(mode, logits, target, mask=None):
-    proba = 1/(1 + np.exp(-logits.detach().numpy()))
-    pred = np.round(proba)
-    target0 = target.detach().numpy()
+    with torch.no_grad():
+        proba = 1/(1 + torch.exp(-logits))
+        pred = proba.round()
 
-    # Should also take lengths into account
-    np_mask = mask.detach().numpy()
-    # print(pred.shape, target0.shape, np_mask.shape)
-    acc = ((pred == target0) * np_mask).sum() / np_mask.sum()
-    auc = roc_auc_score(target0, pred)
-    metrics[mode + ' acc'].append(acc)
-    metrics[mode + ' auc'].append(auc)
-    # (flat_pred == flat_target).mean()
-    if mode == 'test':
+        pred0 = pred.masked_select(mask).cpu().numpy()
+        target0 = target.masked_select(mask).cpu().numpy()
+        acc = (pred0 == target0).mean()
         try:
-            auc = roc_auc_score(target0, pred)
-            print(mode, 'acc={:f} auc={:f}'.format(acc, auc))
+            auc = roc_auc_score(target0, pred0)
         except ValueError:
-            print(mode, 'acc={:f}'.format(acc))
+            auc = -1
+        metrics[mode + ' acc'].append(acc)
+        metrics[mode + ' auc'].append(auc)
+        if mode == 'test':
+            print(mode, 'acc={:f} auc={:f}'.format(acc, auc))
 
 
 def get_batch(actions, lengths, exercises, targets, pos, t):
@@ -242,7 +249,8 @@ def test(actions, lengths, exercises, targets):
 
 if __name__ == '__main__':
     # Model
-    model = DKTM(nb_distinct_actions, nb_distinct_questions, hidden_size)
+    model = DKTM(nb_distinct_actions,
+                 nb_distinct_questions, hidden_size).to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
     # Prepare data
