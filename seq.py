@@ -4,7 +4,8 @@ import torch.nn as nn
 from random import randint
 from collections import defaultdict
 from sklearn.metrics import roc_auc_score
-from prepare import fraction
+from prepare import fraction, assistments
+from datetime import datetime
 import numpy as np
 import sys
 import json
@@ -18,10 +19,12 @@ parser.add_argument('--iter', type=int, nargs='?', default=2)
 parser.add_argument('--data', type=str, nargs='?', default='sim')
 parser.add_argument('--d', type=int, nargs='?', default=20)
 options = parser.parse_args()
+print(options)
 
 
 hidden_size = 20
 learning_rate = 0.005
+metrics = defaultdict(list)
 
 
 USE_CUDA = torch.cuda.is_available()
@@ -68,18 +71,20 @@ elif options.data == 'dummy':
         [0, 0],
         [0, 0]
     ]
-else:
+elif options.data == 'fraction':
     # Load Fraction dataset (or Assistments)
     actions, lengths, exercises, targets = fraction()
-    nb_students = len(actions)
-    nb_questions = 20
+else:
+    # Load Assistments dataset
+    actions, lengths, exercises, targets = assistments()
 
 
-nb_distinct_actions = 1 + max(max(actions[i]) for i in range(nb_students))
-nb_distinct_questions = 1 + max(max(exercises[i]) for i in range(nb_students))
+nb_students = len(actions)
+nb_distinct_actions = 1 + max(v for line in actions for v in line)
+nb_distinct_questions = 1 + max(v for line in exercises for v in line)
 
 
-UNTIL_TRAIN = round(0.8 * nb_students) if nb_students > 5 else 3
+UNTIL_TRAIN = round(0.8 * nb_students) if nb_students > 5 else 1
 train_actions = actions[:UNTIL_TRAIN]
 train_lengths = lengths[:UNTIL_TRAIN]
 train_exercises = exercises[:UNTIL_TRAIN]
@@ -144,14 +149,16 @@ class DKTM(nn.Module):
                                 self.encoder.hidden_size)
 
 
-def sequence_mask(seq_len):
-    max_len = max(seq_len)
+def sequence_mask(lengths, max_len):
     indexes = torch.arange(0, max_len)
     return torch.ByteTensor((indexes < lengths.unsqueeze(1)))
 
 
 def criterion(inp, target, mask=None):
     cross_entropy = nn.BCEWithLogitsLoss(reduction='none')
+    # print('inp', inp.shape)
+    # print('target', target.shape)
+    # print('mask', mask.shape)
     loss = cross_entropy(inp, target).masked_select(mask).mean()
     # print('loss', loss)
     loss = loss.to(device)
@@ -165,14 +172,18 @@ def eval(mode, logits, target, mask=None):
 
     # Should also take lengths into account
     np_mask = mask.detach().numpy()
+    # print(pred.shape, target0.shape, np_mask.shape)
     acc = ((pred == target0) * np_mask).sum() / np_mask.sum()
+    auc = roc_auc_score(target0, pred)
+    metrics[mode + ' acc'].append(acc)
+    metrics[mode + ' auc'].append(auc)
     # (flat_pred == flat_target).mean()
     if mode == 'test':
         try:
             auc = roc_auc_score(target0, pred)
-            print('acc={:f} auc={:f}'.format(acc, auc))
+            print(mode, 'acc={:f} auc={:f}'.format(acc, auc))
         except ValueError:
-            print('acc={:f}'.format(acc))
+            print(mode, 'acc={:f}'.format(acc))
 
 
 def get_batch(actions, lengths, exercises, targets, pos, t):
@@ -195,7 +206,6 @@ def train(train_actions, train_lengths, train_exercises, train_targets,
           optimizer):
     model.train()
 
-    print('# TRAIN')
     for pos in range(0, len(train_actions), options.batch_size):  # .size()
         actual_batch_size = min(options.batch_size, len(train_actions) - pos)
         hidden = model.init_hidden(actual_batch_size)
@@ -204,13 +214,15 @@ def train(train_actions, train_lengths, train_exercises, train_targets,
             actions, lengths, exercises, targets = get_batch(
                 train_actions, train_lengths, train_exercises, train_targets,
                 pos, t)
-            mask = sequence_mask(lengths)
+            mask = sequence_mask(lengths, targets.shape[1])
+            # print('train', lengths.shape, mask.shape)
 
             hidden = repackage_hidden(hidden)  # Detach previous hidden state
             optimizer.zero_grad()
             # Predict
             logits, hidden = model(actions, lengths, exercises, hidden)
-            eval('train', logits, target, mask)
+            # print('triste', logits.shape, targets.shape, mask.shape)
+            eval('train', logits, targets, mask)
 
             loss = criterion(logits, targets, mask)
             loss.backward()
@@ -220,11 +232,12 @@ def train(train_actions, train_lengths, train_exercises, train_targets,
 def test(actions, lengths, exercises, targets):
     model.eval()
 
-    print('# TEST')
     hidden = None
     with torch.no_grad():
         logits, hidden = model(actions, lengths, exercises, hidden)
-        eval('test', logits, targets, mask=sequence_mask(lengths))
+        # print('test', lengths, sequence_mask(lengths, targets.shape[1]))
+        mask = sequence_mask(lengths, targets.shape[1])
+        eval('test', logits, targets, mask)
 
 
 if __name__ == '__main__':
@@ -243,10 +256,17 @@ if __name__ == '__main__':
     test_eval_var = torch.LongTensor(test_exercises).to(device)
     test_target = torch.FloatTensor(test_targets).to(device)
 
-    for _ in range(options.iter):  # Number of epochs
+    for epoch in range(options.iter):  # Number of epochs
+        print('Epoch', epoch)
         train(input_var, lengths, eval_var, target, optimizer)
-    test(input_var, lengths, eval_var, target)
-    test(test_input_var, test_lengths, test_eval_var, test_target)
+        test(test_input_var, test_lengths, test_eval_var, test_target)
+    # test(input_var, lengths, eval_var, target)
+    # test(test_input_var, test_lengths, test_eval_var, test_target)
 
 
-print(json.dumps(vars(options), indent=4))
+timestamp = datetime.now().strftime('%Y%m%dT%H%M%S')
+with open('logs/output-{}.json'.format(timestamp), 'w') as f:
+    f.write(json.dumps({
+        'options': vars(options),
+        'metrics': metrics
+    }, indent=4))

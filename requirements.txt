@@ -1,3 +1,6 @@
 numpy
 torch
-scikit-learn
+scipy
+scikit-learn  # Just for AUC computation lol
+pandas
+matplotlib
