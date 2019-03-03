@@ -151,7 +151,7 @@ class DKTM(nn.Module):
 
 def sequence_mask(lengths, max_len):
     indexes = torch.arange(0, max_len)
-    return torch.ByteTensor((indexes < lengths.unsqueeze(1)))
+    return torch.ByteTensor((indexes < lengths.unsqueeze(1))).to(device)
 
 
 def criterion(inp, target, mask=None):
