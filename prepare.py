@@ -11,10 +11,10 @@ import os
 
 def fraction(decoder):
     # Load data
-    with open('/Users/jilljenn/code/qna/data/fraction.json') as f:
+    with open('data/fraction/fraction.json') as f:
         answers = np.array(json.load(f)['student_data'], dtype=np.int32)
     nb_students, nb_questions = answers.shape
-    with open('/Users/jilljenn/code/qna/data/qmatrix-fraction.json') as f:
+    with open('data/fraction/qmatrix-fraction.json') as f:
         q = np.array(json.load(f)['Q'], dtype=np.int32)
         q_sp = csr_matrix(q)
 
@@ -41,7 +41,7 @@ def fraction(decoder):
     indices = [[] for _ in range(nb_students)]
     features = []
     bonus_features = []
-    # /!\ Off by one
+    # /!\ OK, it's not off by one
     for i in range(nb_students):
         w = 0 * q[0]
         f = 0 * q[0]
@@ -68,8 +68,10 @@ def fraction(decoder):
     # print(metadata[:5])
     # print(q_sp.shape)
     # print(q_sp[features.squeeze()].shape)
-    if decoder == 's':
+    if decoder == 'i':
         metadata = enc.transform(features)
+    elif decoder == 's':
+        metadata = q_sp[features.squeeze()]
     elif decoder == 'is':
         metadata = enc.transform(features)
         metadata = hstack((metadata, q_sp[features.squeeze()])).tocsr()
@@ -117,7 +119,7 @@ def assistments():
 
     # df = pd.read_csv('/Users/jilljenn/code/seq/data/dummy/data.csv')
     dt = time.time()
-    df = pd.read_csv('/Users/jilljenn/code/seq/data/assistments09/data.csv')
+    df = pd.read_csv('/home/jj/code/dktm/data/assistments09/data.csv')
     print('lol all max', df.max())
     print('lol unique items', len(df['item'].unique()))
     print('loaded csv', time.time() - dt)

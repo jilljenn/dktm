@@ -38,6 +38,7 @@ parser.add_argument('--baseline', type=bool, nargs='?', const=True, default=Fals
 parser.add_argument('--fold', type=int, nargs='?', default=0)
 parser.add_argument('--last', type=bool, nargs='?', const=True, default=False)
 parser.add_argument('--rnn', type=str, nargs='?', default='gru')
+parser.add_argument('--randomize', type=bool, nargs='?', const=True, default=False)
 options = parser.parse_args()
 print(options)
 
@@ -123,7 +124,7 @@ if not os.path.isfile(FOLD_FILE):
     np.save(FOLD_FILE, folds)
     print('Computed folds')
 else:
-    folds = np.load(FOLD_FILE)
+    folds = np.load(FOLD_FILE, allow_pickle=True)
     print('Loaded folds')
     print([folds[i].shape for i in range(NB_FOLDS)])
 # sys.exit(0)
@@ -133,6 +134,7 @@ else:
 #                if nb_students > 5 and not options.train else 1)
 i_test = folds[options.fold]
 i_train = list(set(range(nb_students)) - set(i_test))
+print(len(i_train), 'train', len(i_test), 'test')
 train_actions = actions[i_train]
 train_lengths = lengths[i_train]
 train_exercises = exercises[i_train]
@@ -279,7 +281,7 @@ def sequence_mask(lengths, max_len):
     indexes = torch.arange(0, max_len).to(device)
     # print('dev', indexes.device)
     # print('dev', lengths.device)
-    return (indexes < lengths.unsqueeze(1)).byte()
+    return (indexes < lengths.unsqueeze(1))#.byte()
 
 
 def criterion(inp, target, mask=None):
@@ -350,7 +352,8 @@ def train(train_actions, train_lengths, train_exercises, train_targets,
             logits, hidden = model(actions, lengths, exercises, indices,
                                    hidden)
             # print('triste', logits.shape, targets.shape, mask.shape)
-            eval('train', logits, targets, mask)
+            # If we want to log train metrics
+            # eval('train', logits, targets, mask)
 
             loss = criterion(logits, targets, mask)
             loss.backward()
@@ -447,10 +450,19 @@ if __name__ == '__main__':
     metadata = torch.FloatTensor(metadata.todense()).to(device)
 
     for epoch in range(options.iter):  # Number of epochs
-        print('Epoch', epoch)
+        if epoch % 10 == 0:
+            print('Epoch', epoch)
+        # Randomize batches
+        if options.randomize:
+            shuffle = np.random.permutation(len(train_actions))
+            train_actions = train_actions[shuffle]
+            train_lengths = train_lengths[shuffle]
+            train_exercises = train_exercises[shuffle]
+            train_targets = train_targets[shuffle]
+            train_indices = train_indices[shuffle]
         train(train_actions, train_lengths, train_exercises, train_targets,
               train_indices, optimizer)
-        if not options.last:
+        if not options.last and epoch % 10 == 0:
             test(test_actions, test_lengths, test_exercises, test_targets,
                  test_indices)
     test(test_actions, test_lengths, test_exercises, test_targets,
