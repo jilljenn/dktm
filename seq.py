@@ -1,9 +1,11 @@
 import torch
+import torch.nn.functional as F
 from collections import defaultdict
 from sklearn.metrics import roc_auc_score
 from sklearn.linear_model import LogisticRegression
 from prepare import fraction, assistments, assistments2, berkeley
 from datetime import datetime
+from tqdm import tqdm
 import time
 import os
 import numpy as np
@@ -22,7 +24,7 @@ parser = argparse.ArgumentParser(description='Run DKTM')
 parser.add_argument('--batch_size', type=int, nargs='?', default=100)
 parser.add_argument('--bptt', type=int, nargs='?', default=100)
 parser.add_argument('--iter', type=int, nargs='?', default=200)
-parser.add_argument('--data', type=str, nargs='?', default='assistments')
+parser.add_argument('--data', type=str, nargs='?', default='assistments09')
 parser.add_argument('--d', type=int, nargs='?', default=20)
 parser.add_argument('--lr', type=float, nargs='?', default=0.005)
 parser.add_argument('--reg', type=float, nargs='?', default=5e-4)
@@ -98,7 +100,9 @@ elif options.data == 'dummy':
 elif options.data == 'fraction':
     # Load Fraction dataset (or Assistments)
     actions, lengths, exercises, targets, metadata, indices = fraction(options.decoder)
-elif options.data == 'assistments':
+    for obj in [metadata, indices]:
+        print(obj.shape, obj[0])
+elif options.data == 'assistments09':
     # Load Assistments 200k dataset
     actions, lengths, exercises, targets, metadata, indices = assistments()
 elif options.data == 'assistments2':
@@ -189,6 +193,14 @@ class EncoderRNN(nn.Module):
         return outputs, hidden
 
 
+def sparse_one_hot(values, max_value):
+    n = len(values)
+    m = max_value
+    pairs = np.vstack((np.arange(n), values))
+    # print(pairs.shape)
+    return torch.sparse_coo_tensor(pairs, torch.ones(n), (n, m))
+
+
 class Decoder(nn.Module):
     def __init__(self, hidden_size, nb_distinct_questions,
                  nb_distinct_features):
@@ -209,18 +221,29 @@ class Decoder(nn.Module):
         decoded_bias = None
         # decoded = self.item_embedding(exercises)
         # print('metadata', metadata.shape)
+        # print(metadata[indices.flatten()])
+        # print(indices.flatten().shape)
         # print('indices', indices.shape)
         # print('indices view', indices.flatten().shape)
         # print('max indice', max(v for line in indices for v in line))
         # print(*indices.shape, -1)
-        batch_metadata = (torch.index_select(metadata, 0, indices.flatten())
-                               .view(*indices.shape, -1))
+
+        # Slice in scipy
+        # batch_metadata = (
+        #     torch.Tensor(metadata[indices.flatten()].todense())
+        #     .view(*indices.shape, -1)
+        # )
+
+        # Slice in PyTorch
+        select_lines = sparse_one_hot(indices.flatten(), len(metadata))
+        # print(f'one hot shape={select_lines.shape} result shape={(select_lines @ metadata).shape} should reshape to {indices.shape}')
+        batch_metadata = (select_lines @ metadata)#.to_dense().view(*indices.shape, -1)
         if options.dkt:
-            decoded = batch_metadata @ self.feat_embedding.weight
+            decoded = (batch_metadata @ self.feat_embedding.weight).view(*indices.shape, -1)
         else:
             # decoded_bias0 = (batch_metadata @ self.feat_bias.weight).squeeze(2)
             # print(decoded_bias0.shape)
-            decoded_bias = self.linear(batch_metadata).squeeze(2)
+            decoded_bias = self.linear(batch_metadata).squeeze(1).view(*indices.shape)
             # print(decoded_bias.shape)
             # sys.exit(0)
             if options.i:
@@ -257,6 +280,7 @@ class DKTM(nn.Module):
         # sys.exit(0)
         decoded, decoded_bias = self.decoder(exercises, indices)
         # print('bias', decoded_bias.shape)
+        # print('decoded', decoded.shape)
         if options.dkt:
             logits = torch.einsum('bsd,bsd->bs', encoder_outputs, decoded)
         else:
@@ -450,9 +474,12 @@ if __name__ == '__main__':
         print('predict', time.time() - dt)
         sys.exit(0)
 
-    metadata = torch.FloatTensor(metadata.todense()).to(device)
+    metadata = torch.sparse_csr_tensor(
+        metadata.indptr, metadata.indices, metadata.data
+    ).to_sparse_coo().float().to(device)
 
-    for epoch in range(options.iter):  # Number of epochs
+    for epoch in tqdm(range(options.iter)):  # Number of epochs
+        # break
         if epoch % 10 == 0:
             print('Epoch', epoch)
         # Randomize batches

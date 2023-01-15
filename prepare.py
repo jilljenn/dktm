@@ -1,3 +1,13 @@
+"""
+If N students, all variables are N-length arrays
+For student i:
+    actions[i, t]: encoding pair (skill_id_t, outcome_t)
+    lengths[i, t]: length of seq i.e. number of items answered
+    exercises[i, t]: next item i.e. item_id_{t + 1}
+    targets[i, t]: outcome_{t + 1}
+    metadata: sparse features for all possible (i, j) pairs
+    indices: encoding of (i, j) pair corresponding to current (student, exercise)
+"""
 from collections import Counter
 from sklearn.preprocessing import OneHotEncoder
 from scipy.sparse import csr_matrix, hstack, load_npz
