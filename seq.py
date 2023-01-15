@@ -1,7 +1,4 @@
 import torch
-from torch import optim
-import torch.nn as nn
-from random import randint
 from collections import defaultdict
 from sklearn.metrics import roc_auc_score
 from sklearn.linear_model import LogisticRegression
@@ -14,6 +11,12 @@ import sys
 import json
 import argparse
 
+import random
+random.seed(42)
+torch.manual_seed(42)
+optim, nn = torch.optim, torch.nn
+rs = np.random.RandomState(42)
+torch.use_deterministic_algorithms(True)
 
 parser = argparse.ArgumentParser(description='Run DKTM')
 parser.add_argument('--batch_size', type=int, nargs='?', default=100)
@@ -54,7 +57,7 @@ print('device', device)
 
 
 def gen_int(n, m, max_val):
-    return np.random.randint(max_val, size=(n, m))
+    return rs.randint(max_val, size=(n, m))
 
 
 if options.data == 'sim':
@@ -118,7 +121,7 @@ NB_FOLDS = 5
 FOLD_FILE = 'data/{}/folds.npy'.format(options.data)
 if not os.path.isfile(FOLD_FILE):
     students = np.arange(nb_students)
-    np.random.shuffle(students)
+    rs.shuffle(students)
     size = nb_students // NB_FOLDS
     folds = [students[i * size:(i + 1) * size] for i in range(NB_FOLDS - 1)] + [students[(NB_FOLDS - 1) * size:]]
     np.save(FOLD_FILE, folds)
@@ -281,7 +284,7 @@ def sequence_mask(lengths, max_len):
     indexes = torch.arange(0, max_len).to(device)
     # print('dev', indexes.device)
     # print('dev', lengths.device)
-    return (indexes < lengths.unsqueeze(1))#.byte()
+    return (indexes < lengths.unsqueeze(1)) # .byte()
 
 
 def criterion(inp, target, mask=None):
@@ -454,7 +457,7 @@ if __name__ == '__main__':
             print('Epoch', epoch)
         # Randomize batches
         if options.randomize:
-            shuffle = np.random.permutation(len(train_actions))
+            shuffle = rs.permutation(len(train_actions))
             train_actions = train_actions[shuffle]
             train_lengths = train_lengths[shuffle]
             train_exercises = train_exercises[shuffle]
@@ -465,8 +468,9 @@ if __name__ == '__main__':
         if not options.last and epoch % 10 == 0:
             test(test_actions, test_lengths, test_exercises, test_targets,
                  test_indices)
+    print('Results')
     test(test_actions, test_lengths, test_exercises, test_targets,
-             test_indices)
+         test_indices)
 
 
 timestamp = datetime.now().strftime('%Y%m%dT%H%M%S')

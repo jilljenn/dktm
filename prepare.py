@@ -24,7 +24,7 @@ def fraction(decoder):
         code = ''.join(map(str, line))
         skills.add(code + '0')
         skills.add(code + '1')
-    encode = dict(zip(skills, range(10000)))
+    encode = dict(zip(sorted(list(skills)), range(10000)))
 
     # Encode actions
     encode_pair = {}
