@@ -3,9 +3,12 @@ import torch.nn.functional as F
 from collections import defaultdict
 from sklearn.metrics import roc_auc_score
 from sklearn.linear_model import LogisticRegression
-from prepare import fraction, assistments, assistments2, berkeley
+from prepare import assistments, assistments2, berkeley
+from clean_prepare import attempts
+from clean_prepare import fraction
 from datetime import datetime
 from tqdm import tqdm
+from tests.test_seq import test_data
 import time
 import os
 import numpy as np
@@ -111,6 +114,11 @@ elif options.data == 'assistments2':
 elif options.data == 'berkeley':
     # Load Berkeley 560k dataset
     actions, lengths, exercises, targets, metadata, indices = berkeley(options.decoder)
+elif options.data == 'robo':
+    actions, lengths, exercises, targets, metadata, indices = attempts(options.decoder)
+
+
+test_data(actions, lengths, exercises, targets, metadata, indices)
 
 
 nb_students = len(actions)
